@@ -33,7 +33,6 @@ import io.kestra.core.async.AsyncOperationsConfiguration;
 import io.kestra.core.contexts.configuration.KestraConfiguration;
 import io.kestra.core.debug.Breakpoint;
 import io.kestra.core.events.CrudEvent;
-import io.kestra.webserver.exceptions.BulkValidationException;
 import io.kestra.core.exceptions.ConflictException;
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.exceptions.InternalException;
@@ -47,10 +46,6 @@ import io.kestra.core.models.executions.statistics.DailyExecutionStatistics;
 import io.kestra.core.models.flows.*;
 import io.kestra.core.models.flows.check.Check;
 import io.kestra.core.models.flows.input.InputAndValue;
-import io.kestra.webserver.errors.ProblemDetail;
-import io.kestra.webserver.errors.ProblemError;
-import io.kestra.webserver.errors.ProblemType;
-import io.kestra.webserver.errors.ProblemTypes;
 import io.kestra.core.models.hierarchies.FlowGraph;
 import io.kestra.core.models.storage.FileMetas;
 import io.kestra.core.models.tasks.FlowableTask;
@@ -73,6 +68,8 @@ import io.kestra.core.repositories.FlowRepositoryInterface;
 import io.kestra.core.runners.*;
 import io.kestra.core.runners.configuration.LocalFilesConfiguration;
 import io.kestra.core.serializers.FileSerde;
+import io.kestra.core.server.AsyncOperationListener;
+import io.kestra.core.server.AsyncOperationType;
 import io.kestra.core.server.ServerConfig;
 import io.kestra.core.services.*;
 import io.kestra.core.storages.Namespace;
@@ -88,6 +85,11 @@ import io.kestra.plugin.core.trigger.WebhookContext;
 import io.kestra.plugin.core.trigger.WebhookResponse;
 import io.kestra.webserver.annotation.AnonymousAccess;
 import io.kestra.webserver.converters.QueryFilterFormat;
+import io.kestra.webserver.errors.ProblemDetail;
+import io.kestra.webserver.errors.ProblemError;
+import io.kestra.webserver.errors.ProblemType;
+import io.kestra.webserver.errors.ProblemTypes;
+import io.kestra.webserver.exceptions.BulkValidationException;
 import io.kestra.webserver.models.api.ApiAsyncOperationResponse;
 import io.kestra.webserver.models.api.ApiExecution;
 import io.kestra.webserver.models.api.ApiLightExecution;
@@ -147,10 +149,10 @@ import lombok.experimental.SuperBuilder;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
-import tools.jackson.databind.ObjectMapper;
 import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import tools.jackson.databind.ObjectMapper;
 
 import static io.kestra.core.models.Label.CORRELATION_ID;
 import static io.kestra.core.models.Label.SYSTEM_PREFIX;
@@ -268,6 +270,9 @@ public class ExecutionController {
 
     @Inject
     private FileRendererService fileRendererService;
+
+    @Inject
+    private List<AsyncOperationListener> asyncOperationListeners;
 
     @Inject
     private MetricRegistry metricRegistry;
@@ -927,7 +932,8 @@ public class ExecutionController {
                 }
             })
             .findFirst()
-            .orElseThrow(() -> {
+            .orElseThrow(() ->
+            {
                 log.debug("Rejected a webhook call: no trigger on flow '{}.{}' matches the given key.", flow.getNamespace(), flow.getId());
                 return webhookNotFound();
             });
@@ -999,7 +1005,8 @@ public class ExecutionController {
             if (revision.isEmpty()) {
                 flowRepository.findByIdWithoutAcl(tenantId, namespace, id, Optional.empty())
                     .filter(f -> !f.isDeleted() && f.isDraft())
-                    .ifPresent(draftFlow -> {
+                    .ifPresent(draftFlow ->
+                    {
                         throw new IllegalArgumentException(
                             "Flow execution blocked: flow " + draftFlow.uid() + " only has draft revisions. Save it as a published revision before executing it without a revision."
                         );
@@ -1444,12 +1451,14 @@ public class ExecutionController {
         List<ProblemError> invalids = new ArrayList<>();
         for (Execution execution : executions) {
             if (!execution.getState().canBeRestarted()) {
-                invalids.add(executionProblem(
-                    execution.getId(),
-                    "Execution '%s' must be terminated to be restarted, current state is '%s' !"
-                        .formatted(execution.getId(), execution.getState().getCurrent()),
-                    ProblemTypes.CONFLICT
-                ));
+                invalids.add(
+                    executionProblem(
+                        execution.getId(),
+                        "Execution '%s' must be terminated to be restarted, current state is '%s' !"
+                            .formatted(execution.getId(), execution.getState().getCurrent()),
+                        ProblemTypes.CONFLICT
+                    )
+                );
             }
         }
         if (!invalids.isEmpty()) {
@@ -1458,7 +1467,8 @@ public class ExecutionController {
 
         this.restartCounter.increment(executions.size());
 
-        return submitBatchAction(
+        return submitNotifiedBatchAction(
+            AsyncOperationType.EXECUTION_RESTART,
             executions,
             (execution, opId) ->
             {
@@ -1864,7 +1874,8 @@ public class ExecutionController {
 
         this.changeStatusCounter.increment(executions.size());
 
-        return submitBatchAction(
+        return submitNotifiedBatchAction(
+            AsyncOperationType.EXECUTION_CHANGE_STATUS,
             executions,
             (execution, opId) -> executionCommandQueue.emit(UpdateStatus.from(execution, newStatus).withOperationId(opId))
         );
@@ -2046,7 +2057,8 @@ public class ExecutionController {
 
         this.resumeCounter.increment(executions.size());
 
-        return submitBatchAction(
+        return submitNotifiedBatchAction(
+            AsyncOperationType.EXECUTION_RESUME,
             executions,
             (execution, opId) -> executionCommandQueue.emit(Resume.from(execution, createResumed()).withOperationId(opId))
         );
@@ -2116,7 +2128,8 @@ public class ExecutionController {
 
         this.pauseCounter.increment(executions.size());
 
-        return submitBatchAction(
+        return submitNotifiedBatchAction(
+            AsyncOperationType.EXECUTION_PAUSE,
             executions,
             (execution, opId) -> executionCommandQueue.emit(Pause.from(execution).withOperationId(opId))
         );
@@ -2170,7 +2183,7 @@ public class ExecutionController {
 
         this.killCounter.increment(executions.size());
 
-        return submitBatchAction(executions, (execution, opId) ->
+        return submitNotifiedBatchAction(AsyncOperationType.EXECUTION_KILL, executions, (execution, opId) ->
         {
             eventPublisher.publishEvent(CrudEvent.of(execution, execution.withState(State.Type.KILLING)));
             killQueue.emit(
@@ -2235,7 +2248,7 @@ public class ExecutionController {
 
         this.replayCounter.increment(executions.size());
 
-        return submitBatchAction(executions, (execution, opId) ->
+        return submitNotifiedBatchAction(AsyncOperationType.EXECUTION_REPLAY, executions, (execution, opId) ->
         {
             // When latestRevision is true the replay starts as a new execution against the
             // latest non-draft revision; otherwise it stays bound to the execution's original
@@ -2506,11 +2519,11 @@ public class ExecutionController {
 
         this.updateLabelsCounter.increment(executions.size());
 
-        return submitBatchAction(executions, (execution, opId) ->
-            executionCommandQueue.emit(UpdateLabels.from(execution, mergedLabelsByExecutionId.get(execution.getId())).withOperationId(opId))
+        return submitNotifiedBatchAction(
+            AsyncOperationType.EXECUTION_SET_LABELS, executions,
+            (execution, opId) -> executionCommandQueue.emit(UpdateLabels.from(execution, mergedLabelsByExecutionId.get(execution.getId())).withOperationId(opId))
         );
     }
-
 
     @ExecuteOn(TaskExecutors.IO)
     @Post(uri = "/{executionId}/actions/unqueue")
@@ -2580,7 +2593,8 @@ public class ExecutionController {
 
         this.unqueueCounter.increment(executions.size());
 
-        return submitBatchAction(
+        return submitNotifiedBatchAction(
+            AsyncOperationType.EXECUTION_UNQUEUE,
             executions,
             (execution, opId) -> executionCommandQueue.emit(Unqueue.from(execution, state).withOperationId(opId))
         );
@@ -2654,7 +2668,8 @@ public class ExecutionController {
 
         this.forceRunCounter.increment(executions.size());
 
-        return submitBatchAction(
+        return submitNotifiedBatchAction(
+            AsyncOperationType.EXECUTION_FORCE_RUN,
             executions,
             (execution, opId) -> executionCommandQueue.emit(ForceRun.from(execution).withOperationId(opId))
         );
@@ -3101,14 +3116,12 @@ public class ExecutionController {
         return ProblemError.ofItem(detail, "executions[" + executionId + "]", type);
     }
 
-    /**
-     * Submits a batch of async operations sharing a single operationId and returns
-     * an accepted response with the operationId and the total number of items.
-     */
-    private MutableHttpResponse<ApiAsyncOperationResponse> submitBatchAction(
+    private MutableHttpResponse<ApiAsyncOperationResponse> submitNotifiedBatchAction(
+        AsyncOperationType operationType,
         List<Execution> executions,
         ThrowingBiConsumer<Execution, String> emit) throws QueueException {
         String operationId = IdUtils.create();
+        asyncOperationListeners.forEach(listener -> listener.onAsyncOperationCreated(operationId, operationType, executions.size()));
         for (Execution execution : executions) {
             emit.accept(execution, operationId);
         }
