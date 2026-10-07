@@ -332,7 +332,7 @@
 </template>
 
 <script setup lang="ts">
-    import {KsMessage, KsEditor, debounce} from "@kestra-io/design-system"
+    import {KsMessage, KsEditor, State, debounce} from "@kestra-io/design-system"
     import type {FormItemRule} from "@kestra-io/design-system"
     import ValidationError from "../flows/ValidationError.vue"
     import {ref, reactive, computed, watch, onMounted, onBeforeUnmount, toRaw, markRaw, type Component, getCurrentInstance, nextTick} from "vue"
@@ -744,6 +744,9 @@
 
                 metadataCallback(data)
             } else if (props.execution !== undefined) {
+                if (!State.isPaused(props.execution.state.current)) {
+                    return
+                }
                 const options = {id: props.execution.id}
                 const data = await executionsStore.validateResume({...options, formData})
 
@@ -980,6 +983,7 @@
     })
 
     onBeforeUnmount(() => {
+        debouncedValidation.cancel()
         if (keyListener) {
             document.removeEventListener("keydown", keyListener)
         }
@@ -997,7 +1001,7 @@
         validateInputs()
     })
 
-    watch(() => props.execution, () => {
+    watch(() => props.execution?.id, () => {
         invalidateValidationCache()
         validateInputs()
     })
