@@ -3,6 +3,7 @@ import {usePluginsStore} from "../stores/plugins"
 import {useBlueprintsStore} from "../stores/blueprints"
 import {useMiscStore} from "override/stores/misc"
 import {Tab} from "./multiPanelTypes"
+import {storageKeys} from "./constants"
 
 interface TrackedTab extends Tab {
     potential?: boolean
@@ -95,7 +96,7 @@ function sendTrackingEvent(eventData: any) {
         const sendingData = {
             ...eventData,
             iid: miscStore.configs?.uuid,
-            uid: localStorage.getItem("uid"),
+            uid: localStorage.getItem(storageKeys.UID),
             date: new Date().toISOString(),
         }
 

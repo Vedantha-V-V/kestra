@@ -331,8 +331,8 @@ export function extractFileNameFromContentDisposition(header: string | null | un
 export function switchTheme(miscStore: {theme: SelectedTheme}, theme?: SelectedTheme) {
     // default theme
     if (theme === undefined) {
-        if (localStorage.getItem("theme")) {
-            theme = localStorage.getItem("theme") as SelectedTheme
+        if (localStorage.getItem(storageKeys.THEME)) {
+            theme = localStorage.getItem(storageKeys.THEME) as SelectedTheme
         } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
             theme = "dark"
         } else {
@@ -366,7 +366,7 @@ export function switchTheme(miscStore: {theme: SelectedTheme}, theme?: SelectedT
 
     miscStore.theme = theme
 
-    localStorage.setItem("theme", theme)
+    localStorage.setItem(storageKeys.THEME, theme)
 
     void document.body.offsetHeight
     requestAnimationFrame(() => disableTransitions.remove())
@@ -375,7 +375,7 @@ export function switchTheme(miscStore: {theme: SelectedTheme}, theme?: SelectedT
 export type SelectedTheme = "syncWithSystem" | "dark" | "dark-2" | "light"
 
 export function getSelectedTheme(): SelectedTheme {
-    return (localStorage.getItem("theme") as SelectedTheme | null) ?? "syncWithSystem"
+    return (localStorage.getItem(storageKeys.THEME) as SelectedTheme | null) ?? "syncWithSystem"
 }
 
 export function getTheme(): "light" | "dark" {
